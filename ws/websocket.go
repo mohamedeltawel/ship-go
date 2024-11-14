@@ -14,6 +14,7 @@ import (
 )
 
 const connIsClosedError string = "connection is closed"
+const shipWriteChannelTimeout = 5 * time.Second
 
 // Handling of the actual websocket connection to a remote device
 type WebsocketConnection struct {
@@ -38,7 +39,7 @@ type WebsocketConnection struct {
 	remoteSki string
 
 	muxConnClosed sync.Mutex
-	muxShipWrite  sync.Mutex
+	muxShipWrite  sync.RWMutex
 	muxConWrite   sync.Mutex
 	shutdownOnce  sync.Once
 }
@@ -92,7 +93,7 @@ func (w *WebsocketConnection) writeShipPump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		w.closeShipWriteChannel()
+		go w.closeShipWriteChannel()
 	}()
 
 	for {
@@ -251,15 +252,19 @@ func (w *WebsocketConnection) InitDataProcessing(dataProcessing api.WebsocketDat
 
 // write a message to the websocket connection
 func (w *WebsocketConnection) WriteMessageToWebsocketConnection(message []byte) error {
-	w.muxShipWrite.Lock()
-	defer w.muxShipWrite.Unlock()
+	w.muxShipWrite.RLock()
+	defer w.muxShipWrite.RUnlock()
 
 	if w.isConnClosed() || w.shipWriteChannel == nil {
 		return errors.New(connIsClosedError)
 	}
 
-	w.shipWriteChannel <- message
-	return nil
+	select {
+	case <-time.After(shipWriteChannelTimeout):
+		return errors.New("write channel closed or overrun")
+	case w.shipWriteChannel <- message:
+		return nil
+	}
 }
 
 // make sure websocket Write is only called once at a time
